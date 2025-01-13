@@ -1,17 +1,14 @@
+import json
 import os, re, requests
 from flask import Flask, request, render_template, jsonify
 from bs4 import BeautifulSoup
-from qbittorrentapi import Client
 from dotenv import load_dotenv
 app = Flask(__name__)
 
 #Load environment variables
 load_dotenv()
-QB_HOST = os.getenv("QB_HOST")
-QB_PORT = os.getenv("QB_PORT")
-QB_USERNAME = os.getenv("QB_USERNAME")
-QB_PASSWORD = os.getenv("QB_PASSWORD")
-QB_CATEGORY = os.getenv("QB_CATEGORY")
+TRANSMISSION_HOST = os.getenv("TRANSMISSION_HOST")
+TRANSMISSION_API_KEY = os.getenv("TRANSMISSION_API_KEY")
 SAVE_PATH_BASE = os.getenv("SAVE_PATH_BASE")
 
 # Custom Nav Link Variables
@@ -111,7 +108,7 @@ def search():
 
 # Endpoint to send magnet link to qBittorrent
 @app.route('/send', methods=['POST'])
-def send_to_qb():
+def send_to_transmission():
     data = request.json
     details_url = data.get('link')
     title = data.get('title')
@@ -123,10 +120,32 @@ def send_to_qb():
         if not magnet_link:
             return jsonify({'message': 'Failed to extract magnet link'}), 500
 
-        save_path = f"{SAVE_PATH_BASE}/{sanitize_title(title)}"
-        qb = Client(host=QB_HOST, port=QB_PORT, username=QB_USERNAME, password=QB_PASSWORD)
-        qb.auth_log_in()
-        qb.torrents_add(urls=magnet_link, save_path=save_path, category=QB_CATEGORY)
+        headers = {
+            "X-Transmission-Session-Id": TRANSMISSION_API_KEY
+        }
+
+        response = requests.post(TRANSMISSION_HOST, headers=headers)
+
+        # Check if we got a session ID
+        if response.status_code == 409:
+            # Extract the session ID from the response headers
+            session_id = response.headers['X-Transmission-Session-Id']
+            headers["X-Transmission-Session-Id"] = session_id
+        else:
+            print("Error retrieving session ID!")
+            exit(1)
+
+        data = {
+            "method": "torrent-add",
+            "arguments": {
+                "filename": magnet_link,  # The magnet link you want to add
+                "download-dir": SAVE_PATH_BASE  # Optional: The directory to store the downloaded files
+            }
+        }
+
+        # Sending the request to add the magnet link
+        response = requests.post(TRANSMISSION_HOST, headers=headers, data=json.dumps(data))
+
         return jsonify({'message': f'Download added successfully! This may take some time, the download will show in Audiobookshelf when completed.'})
     except Exception as e:
         return jsonify({'message': str(e)}), 500
@@ -134,15 +153,37 @@ def send_to_qb():
 @app.route('/status')
 def status():
     try:
-        qb = Client(host=QB_HOST, port=QB_PORT, username=QB_USERNAME, password=QB_PASSWORD)
-        qb.auth_log_in()
-        torrents = qb.torrents_info(category=QB_CATEGORY)
+        headers = {
+            "X-Transmission-Session-Id": TRANSMISSION_API_KEY
+        }
+
+        response = requests.post(TRANSMISSION_HOST, headers=headers)
+
+        if response.status_code == 409:
+            session_id = response.headers['X-Transmission-Session-Id']
+            headers["X-Transmission-Session-Id"] = session_id
+        else:
+            print("Error retrieving session ID!")
+            exit(1)
+
+        # Step 2: Prepare the data to get torrent information
+        data = {
+            "method": "torrent-get",
+            "arguments": {
+                "fields": ["id", "name", "status", "percentDone", "downloadDir", "rateDownload", "rateUpload"]
+            }
+        }
+
+        # Sending the request to get torrent information
+        response = requests.post(TRANSMISSION_HOST, headers=headers, data=json.dumps(data))
+
+        torrents = response.json().get("arguments", {}).get("torrents", [])
+        print(torrents)
         torrent_list = [
             {
                 'name': torrent.name,
-                'progress': round(torrent.progress * 100, 2),
-                'state': torrent.state,
-                'size': f"{torrent.total_size / (1024 * 1024):.2f} MB"
+                'progress': round(torrent.percentDone * 100, 2),
+                'size': torrent.totalSize
             }
             for torrent in torrents
         ]
